@@ -41,53 +41,7 @@ bool isDebugged() {
     return (info.kp_proc.p_flag & P_TRACED) != 0;
 }
 
-bool scan_taskinfo(){
-    struct task_dyld_info dyld_info;
-    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
-
-    kern_return_t kr = task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&dyld_info, &count);
-    if (kr != KERN_SUCCESS) {
-        //NSLog(@"[DEBUG] task_info(TASK_DYLD_INFO) failed: %d", kr);
-        return false;
-    }
-
-    struct dyld_all_image_infos *infos = (struct dyld_all_image_infos *)dyld_info.all_image_info_addr;
-    if (!infos) {
-        //NSLog(@"[DEBUG] all_image_info_addr is NULL");
-        return false;
-    }
-
-    uint32_t imageCount = infos->infoArrayCount;
-    const struct dyld_image_info *imageArray = infos->infoArray;
-
-    //NSLog(@"[DEBUG] image count from task_info: %u", imageCount);
-
-    for (uint32_t i = 0; i < imageCount; i++) {
-        const char *imageName = imageArray[i].imageFilePath;
-        const void *imageLoadAddr = imageArray[i].imageLoadAddress;
-        
-        if (!imageName) continue;
-        
-        NSString *imageStr = [NSString stringWithUTF8String:imageName];
-        
-        // Log semua image path dan address
-        //NSLog(@"[DEBUG] task info: #%u: %p => %@", i, imageLoadAddr, imageStr);
-        
-        if ([imageStr containsString:@"substrate"] ||
-            [imageStr containsString:@"tweak"] ||
-            [imageStr containsString:@"libhooker"] ||
-            [imageStr containsString:@"frida"] ||
-            [imageStr containsString:@".jbroot"] ||
-            [imageStr containsString:@"roothide"] ||
-            [imageStr containsString:@"rootpatch"]) {
-            //NSLog(@"[DETECT] Suspicious dylib: %@", imageStr);
-            // return YES;
-        }
-    }
-    return false;
-}
-
-bool scan_csops() {
+bool check_csops() {
     void *flags;
     int ret = csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
     if (ret == -1) return NO;
@@ -95,7 +49,7 @@ bool scan_csops() {
     return false;
 }
 
-bool checkWritableRestrictedPaths() {
+bool check_writablepath() {
     const char *paths[] = {"/", "/jb/", "/private/", "/root/"};
     for (const char *base : paths) {
         NSString *uuidStr = [[NSUUID UUID] UUIDString];
@@ -104,84 +58,57 @@ bool checkWritableRestrictedPaths() {
         if (f) {
             fclose(f);
             remove(path.c_str());
-            NSLog(@"[JAILBREAK] Writable path found: %s", base);
+            NSLog(@"[DEBUG] (check_writablepath) found: %s", base);
             return true;
         }
     }
     return false;
 }
 
-bool checkSuspiciousObjCClass() {
-    Class cls = objc_getClass("ShadowRuleset");
-    if (!cls) return false;
-    SEL sel = sel_registerName("internalDictionary");
-    Method m = class_getInstanceMethod(cls, sel);
-    if (m) {
-        NSLog(@"[JAILBREAK] ShadowRuleset class with selector internalDictionary detected");
-        return true;
-    }
-    return false;
-}
-
-bool checkFork() {
+bool check_fork() {
     pid_t pid = fork();
     if (pid >= 0) {
         if (pid > 0) kill(pid, SIGKILL);
-        NSLog(@"[JAILBREAK] fork() succeeded, sandbox likely bypassed");
+        NSLog(@"[DEBUG] fork() succeeded");
         return true;
     }
     return false;
 }
 
-bool scanForHiddenDylibs() {
-    mach_port_t task = mach_task_self();
-    vm_address_t address = 0;
-    vm_size_t size = 0;
-    natural_t depth = 0;
-    struct vm_region_submap_info_64 info;
-    mach_msg_type_number_t infoCount = VM_REGION_SUBMAP_INFO_COUNT_64;
+bool check_symbolic() {
+    const char* paths[] = {
+        "/Applications", "/Library/Ringtones", "/usr/arm-apple-darwin9",
+        "/usr/include", "/usr/libexec", "/usr/share"
+    };
 
-    while (1) {
-        kern_return_t kr = vm_region_recurse_64(task, &address, &size, &depth, (vm_region_info_t)&info, &infoCount);
-        if (kr != KERN_SUCCESS) {
-            break;
+    for (const char* path : paths) {
+        struct stat s;
+        if (lstat(path, &s) == 0 && S_ISLNK(s.st_mode)) {
+            NSLog(@"[DEBUG] (check_symbolic) found: %s", path);
+            return true;
         }
-        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE)) {
-            vm_address_t magic = 0;
-            vm_size_t readSize;
-            kr = vm_read_overwrite(task, address, sizeof(uint32_t), (vm_address_t)&magic, &readSize);
-
-            if (kr == KERN_SUCCESS && readSize == sizeof(uint32_t)) {
-                if (magic == MH_MAGIC_64 || magic == MH_CIGAM_64) {
-                    Dl_info dlinfo;
-                    if (dladdr((const void *)address, &dlinfo) && dlinfo.dli_fname) {
-                        NSString *libName = [NSString stringWithUTF8String:dlinfo.dli_fname];
-                        if (![libName containsString:@"/System/Library/"] &&
-                            ![libName containsString:@"/usr/lib/"] &&
-                            ![libName containsString:@"/private/preboot"]) {
-                            //NSLog(@"[DEBUG] Suspicious Mach-O at: %p (%@)", (void *)address, libName);
-                        }
-                        if ([libName containsString:@"root"] || [libName containsString:@"hook"] || [libName containsString:@"substrate"] || [libName containsString:@"tweak"] || [libName containsString:@".jbroot"]) {
-                            //NSLog(@"[DEBUG] Suspicious Mach-O at: %p (%@)", (void *)address, libName);
-                            //return true;
-                        }
-                    } else {
-                        NSLog(@"[DEBUG] Unknown Mach-O image at: %p", (void *)address);
-                        //return true;
-                    }
-                }
-            }
-        }
-
-        address += size;
     }
-
     return false;
 }
 
-@implementation Init
+bool check_path2() {
+    const char* suspiciousFiles[] = {
+        "/Applications/Cydia.app", "/Library/MobileSubstrate/MobileSubstrate.dylib",
+        "/bin/bash", "/usr/sbin/sshd", "/etc/apt", "/private/var/lib/cydia",
+        "/usr/lib/libjailbreak.dylib", "/var/lib/cydia"
+    };
 
-+ (BOOL)isDeviceJailbroken {
+    for (const char* path : suspiciousFiles) {
+        struct stat s;
+        if (stat(path, &s) == 0) {
+            NSLog(@"[DEBUG] (check_path2) found: %s", path);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool check_path(){
     NSArray *paths = @[
         @"/var/jb",
         @"/var/containers/Bundle/tweaksupport",
@@ -238,35 +165,16 @@ bool scanForHiddenDylibs() {
         BOOL foundByNSFileManager = [[NSFileManager defaultManager] fileExistsAtPath:path];
         
         if (foundByNSFileManager) {
-            NSLog(@"[DEBUG] Path found: %@ via NSFileManager", path);
-            //return YES;
+            NSLog(@"[DEBUG] (check_path) found: %@", path);
+            return true;
         }
         
     }
     
-    struct statfs sfs;
-    if (statfs("/var/containers/Bundle/Application", &sfs) == 0) {
-        //NSLog(@"[DEBUG] FS Bundle/Application Type: %d, Flags: 0x%x", sfs.f_type, sfs.f_flags);
-    }
-    
-    if (statfs("/var/jb", &sfs) == 0) {
-        //NSLog(@"[DEBUG] FS var/jb Type: %d, Flags: 0x%x", sfs.f_type, sfs.f_flags);
-    }
-    
-    if (statfs("/private/", &sfs) == 0) {
-        //NSLog(@"[DEBUG] FS /private Type: %d, Flags: 0x%x", sfs.f_type, sfs.f_flags);
-    }
-    
-    if (statfs("/Applications", &sfs) == 0) {
-        //NSLog(@"[DEBUG] FS /private Type: %d, Flags: 0x%x", sfs.f_type, sfs.f_flags);
-    }
+    return false;
+}
 
-    struct stat s;
-    if (lstat("/Applications", &s) == 0 && (s.st_mode & S_IFLNK)) {
-        //NSLog(@"[DEBUG] /Applications is a symbolic link.");
-        //return YES;
-    }
-    
+bool check_env(){
     NSArray *envVars = @[
         @"DYLD_INSERT_LIBRARIES",
         @"DYLD_LIBRARY_PATH",
@@ -291,47 +199,167 @@ bool scanForHiddenDylibs() {
         char *value = getenv([var UTF8String]);
         if (value != NULL) {
             NSString *strValue = [NSString stringWithUTF8String:value];
-            NSLog(@"[DEBUG] found env var %@: %@", var, strValue);
-            //return YES;
+            NSLog(@"[DEBUG] (check_env) found: %@ - %@", var, strValue);
+            return true;
         }
     }
     
-    if(isDebugged()){
-        NSLog(@"[DEBUG] Debug detected.");
-    }
-    
-    if(scanForHiddenDylibs()){
-        //return YES;
-    }
-    
-    if(scan_taskinfo()){
-        
-    }
-    
-    if(scan_csops()){
-        
-    }
-    
-    if(checkWritableRestrictedPaths()){
-        
-    }
-    
-    if(checkSuspiciousObjCClass()){
-        
-    }
-    
-    if(checkFork()){
-        
-    }
-    
+    return false;
+}
+
+static NSArray<NSString *> *blacklist_lib() {
+    return @[
+        @"substrate", @"Substrate", @"TweakInject",
+        @"tweak", @"libhooker", @"frida", @".jbroot",
+        @"roothide", @"rootpatch", @"Shadow",
+        @"systemhook", @"SubstrateLoader", @"SSLKillSwitch2",
+        @"SSLKillSwitch", @"MobileSubstrate", @"CydiaSubstrate",
+        @"cynject", @"CustomWidgetIcons", @"PreferenceLoader",
+        @"RocketBootstrap", @"WeeLoader", @"/.file",
+        @"libhooker", @"SubstrateInserter", @"SubstrateBootstrap",
+        @"ABypass", @"FlyJB", @"Substitute", @"Cephei",
+        @"Electra", @"AppSyncUnified-FrontBoard", @"Shadow",
+        @"FridaGadget", @"libcycript"
+    ];
+}
+NSArray<NSString *> *suspicious = blacklist_lib();
+
+bool check_dyld(){
     for (int i = 0; i < _dyld_image_count(); i++) {
         const char *dyld = _dyld_get_image_name(i);
         NSString *dyldStr = [NSString stringWithUTF8String:dyld];
-        //NSLog(@"[DEBUG] dladdr : sname: %s | fname: %s | fbase: %p | saddr: %p", info.dli_sname, info.dli_fname, info.dli_fbase, info.dli_saddr);
-        if ([dyldStr containsString:@"substrate"] || [dyldStr containsString:@"tweak"] || [dyldStr containsString:@"libhooker"] || [dyldStr containsString:@"frida"] || [dyldStr containsString:@".jbroot"] || [dyldStr containsString:@"roothide"] || [dyldStr containsString:@"rootpatch"]) {
-            //return YES;
+        for (NSString *keyword in suspicious) {
+            if ([dyldStr localizedCaseInsensitiveContainsString:keyword]) {
+                NSLog(@"[DEBUG] (check_dyld) found: %@", dyldStr);
+                return true;
+            }
         }
-        //NSLog(@"[DEBUG] Found dyld loaded: %@", dyldStr);
+    }
+    return false;
+}
+
+bool check_vmdyld() {
+    mach_port_t task = mach_task_self();
+    vm_address_t address = 0;
+    vm_size_t size = 0;
+    natural_t depth = 0;
+    struct vm_region_submap_info_64 info;
+    mach_msg_type_number_t infoCount = VM_REGION_SUBMAP_INFO_COUNT_64;
+
+    while (1) {
+        kern_return_t kr = vm_region_recurse_64(task, &address, &size, &depth, (vm_region_info_t)&info, &infoCount);
+        if (kr != KERN_SUCCESS) {
+            break;
+        }
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE)) {
+            vm_address_t magic = 0;
+            vm_size_t readSize;
+            kr = vm_read_overwrite(task, address, sizeof(uint32_t), (vm_address_t)&magic, &readSize);
+
+            if (kr == KERN_SUCCESS && readSize == sizeof(uint32_t)) {
+                if (magic == MH_MAGIC_64 || magic == MH_CIGAM_64) {
+                    Dl_info dlinfo;
+                    if (dladdr((const void *)address, &dlinfo) && dlinfo.dli_fname) {
+                        NSString *libName = [NSString stringWithUTF8String:dlinfo.dli_fname];
+                        for (NSString *keyword in suspicious) {
+                            if ([libName localizedCaseInsensitiveContainsString:keyword]) {
+                                NSLog(@"[DEBUG] (check_vmdyld) found: %p (%@)", (void *)address, libName);
+                                return true;
+                            }
+                        }
+                        
+                    } else {
+                        NSLog(@"[DEBUG] (check_vmdyld) Unknown Mach-O image at: %p", (void *)address);
+                        //return true;
+                    }
+                }
+            }
+        }
+
+        address += size;
+    }
+
+    return false;
+}
+
+bool check_taskinfo(){
+    struct task_dyld_info dyld_info;
+    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+
+    kern_return_t kr = task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&dyld_info, &count);
+    if (kr != KERN_SUCCESS) {
+        return false;
+    }
+
+    struct dyld_all_image_infos *infos = (struct dyld_all_image_infos *)dyld_info.all_image_info_addr;
+    if (!infos) {
+        return false;
+    }
+
+    uint32_t imageCount = infos->infoArrayCount;
+    const struct dyld_image_info *imageArray = infos->infoArray;
+    for (uint32_t i = 0; i < imageCount; i++) {
+        const char *imageName = imageArray[i].imageFilePath;
+        //const void *imageLoadAddr = imageArray[i].imageLoadAddress;
+    
+        if (!imageName) continue;
+        
+        NSString *imageStr = [NSString stringWithUTF8String:imageName];
+        //NSLog(@"[DEBUG] task info: #%u: %p => %@", i, imageLoadAddr, imageStr);
+        
+        for (NSString *keyword in suspicious) {
+            if ([imageStr localizedCaseInsensitiveContainsString:keyword]) {
+                NSLog(@"[DETECT] (check_taskinfo) found: %@", imageStr);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+@implementation Init
+
++ (BOOL)isDeviceJailbroken {
+    NSLog(@"[DEBUG] Detection..");
+    
+    if(check_csops()){
+        
+    }
+    
+    if(check_writablepath()){
+        return YES;
+    }
+    
+    if(check_path()){
+        return YES;
+    }
+    
+    if(check_path2()){
+        return YES;
+    }
+    
+    if(check_fork()){
+        return YES;
+    }
+    
+    if(check_env()){
+        return YES;
+    }
+    
+    if(check_symbolic()){
+        return YES;
+    }
+    
+    if(check_dyld()){
+        return YES;
+    }
+    
+    if(check_vmdyld()){
+        return YES;
+    }
+    
+    if(check_taskinfo()){
+        return YES;
     }
     
     return NO;

@@ -11,7 +11,6 @@ import SwiftUI
 struct ContentView: View {
     @State private var isJailbroken: Bool? = nil
     @State private var isFrida: Bool? = nil
-    @State private var isGGRunning: Bool? = nil
 
     var body: some View {
         VStack(spacing: 20) {
@@ -36,7 +35,6 @@ struct ContentView: View {
         .onAppear {
             isJailbroken = Init.isDeviceJailbroken()
             isFrida = Init.isFridaRunning()
-            isGGRunning = Init.isGodGameRunning()
         }
         .padding()
     }
