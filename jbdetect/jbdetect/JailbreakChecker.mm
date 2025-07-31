@@ -30,6 +30,9 @@
 #import <objc/runtime.h>
 #import <string>
 #import <uuid/uuid.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <arpa/inet.h>
 #import "JailbreakChecker.h"
 #import "codesign.h"
 
@@ -219,7 +222,7 @@ static NSArray<NSString *> *blacklist_lib() {
         @"libhooker", @"SubstrateInserter", @"SubstrateBootstrap",
         @"ABypass", @"FlyJB", @"Substitute", @"Cephei",
         @"Electra", @"AppSyncUnified-FrontBoard", @"Shadow",
-        @"FridaGadget", @"libcycript"
+        @"FridaGadget", @"libcycript", @"frida"
     ];
 }
 NSArray<NSString *> *suspicious = blacklist_lib();
@@ -317,6 +320,45 @@ bool check_taskinfo(){
     return false;
 }
 
+bool check_frida_process() {
+    FILE *pipe = popen("ps -e", "r");
+    if (!pipe) return false;
+
+    char buffer[512];
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        if (strstr(buffer, "frida") || strstr(buffer, "Frida")) {
+            NSLog(@"[DETECT] (check_frida_process) Found frida process: %s", buffer);
+            pclose(pipe);
+            return true;
+        }
+    }
+
+    pclose(pipe);
+    return false;
+}
+
+bool check_frida_ports() {
+    int ports[] = { 27042, 27043 };
+    for (int port : ports) {
+        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+        if (sockfd == -1) continue;
+
+        struct sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+        int result = connect(sockfd, (struct sockaddr *)&addr, sizeof(addr));
+        close(sockfd);
+
+        if (result == 0) {
+            NSLog(@"[DETECT] (check_frida_ports) Port open: %d", port);
+            return true;
+        }
+    }
+    return false;
+}
+
 @implementation Init
 
 + (BOOL)isDeviceJailbroken {
@@ -365,8 +407,15 @@ bool check_taskinfo(){
     return NO;
 }
 
-//Will be update soon
 + (BOOL)isFridaRunning {
+    
+    if(check_frida_process()){
+        return YES;
+    }
+    
+    if(check_frida_ports()){
+        return YES;
+    }
     
     return NO;
 }
